@@ -91,3 +91,21 @@ Use vePFS runtime files as the source of truth:
 - `jobs/failed/*.result.json`
 
 This path still works when `volc ml_task logs` is permission-blocked.
+
+## 7. Control The Controller Without Platform Stop Permission
+
+If you need to stop the active child, clear abandoned queue items, or retire the whole controller:
+
+```bash
+python submit_control.py \
+  --root /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto/runtime/platform_<task_id> \
+  --action retire_controller \
+  --cancel-active-job \
+  --purge-queue \
+  --reason "replace stale forwarding controller"
+```
+
+Then inspect:
+
+- `control/done/*.result.json`
+- `control/failed/*.result.json`

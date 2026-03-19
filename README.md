@@ -12,8 +12,12 @@ The controller runs inside one long-lived ML Platform task and watches a shared 
 - `jobs/running/`: controller-owned running specs and metadata
 - `jobs/done/`: finished specs and result JSONs
 - `jobs/failed/`: failed specs and result JSONs
+- `jobs/cancelled/`: queue specs that were cancelled before launch
 - `logs/jobs/<job_id>.log`: per-job stdout/stderr
 - `state/controller_state.json`: current controller heartbeat and active job
+- `control/queue/`: externally written admin requests
+- `control/done/`: completed admin requests
+- `control/failed/`: rejected admin requests
 
 This lets you:
 
@@ -26,6 +30,7 @@ This lets you:
 
 - `controller.py`: main dispatcher loop
 - `submit_job.py`: helper that writes a JSON spec into the queue
+- `submit_control.py`: helper that writes an admin request into `control/queue`
 - `volc_dispatcher_entry.sh`: task entrypoint that builds the runtime root and starts the controller
 - `examples/controller_task_min_submit.yaml`: minimal ML task submit config using a tiny `UserCodePath`
 - `examples/controller_task_full_submit.yaml`: historical full-sandbox submit config
@@ -45,6 +50,7 @@ This lets you:
 3. Wait until the task is `Running`.
 4. Validate the controller by queueing a tiny smoke job.
 5. Only after the smoke reaches `done/`, start queueing real training jobs.
+6. If you need to stop an active child, purge abandoned queue items, or retire the controller without ML Platform stop permission, write an admin request into `control/queue/`.
 
 See [quickstart.md](/F:/InformationAndCourses/Code/node-controller/docs/quickstart.md) for exact commands.
 

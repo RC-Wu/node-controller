@@ -8,6 +8,11 @@ runtime/platform_<task_id>/
 |  |- queue/
 |  |- running/
 |  |- done/
+|  |- failed/
+|  `- cancelled/
+|- control/
+|  |- queue/
+|  |- done/
 |  `- failed/
 |- logs/
 |  |- controller_heartbeat.jsonl
@@ -28,6 +33,14 @@ runtime/platform_<task_id>/
   - successful completion record
 - `failed/*.result.json`
   - failed completion record
+- `cancelled/*.result.json`
+  - queued job cancelled before launch
+- `control/queue/*.json`
+  - admin requests such as `cancel_active_job`, `purge_queue`, `retire_controller`
+- `control/done/*.result.json`
+  - successful or accepted admin requests
+- `control/failed/*.result.json`
+  - rejected admin requests
 - `logs/jobs/<job_id>.log`
   - child stdout/stderr
 - `state/controller_state.json`

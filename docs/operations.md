@@ -30,6 +30,18 @@ Before queueing a new real training job, inspect:
 
 Do not blindly submit duplicate work if another automation or worker already enqueued an equivalent spec.
 
+## No Platform Stop Permission Workaround
+
+If the current account cannot call `volc ml_task cancel`, do not assume the controller is uncontrollable.
+
+Use the runtime control queue instead:
+
+1. `submit_control.py --action cancel_active_job`
+2. `submit_control.py --action purge_queue`
+3. `submit_control.py --action retire_controller --cancel-active-job --purge-queue`
+
+This only works for controllers started from the newer controller code that watches `control/queue/`.
+
 ## Timeout
 
 The examples here use `ActiveDeadlineSeconds=432000`.
