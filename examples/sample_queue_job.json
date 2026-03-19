@@ -1,0 +1,11 @@
+{
+  "job_id": "smoke_gpu_probe",
+  "command": [
+    "bash",
+    "-lc",
+    "hostname && nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader"
+  ],
+  "workdir": "/dev_vepfs/rc_wu",
+  "env": {},
+  "timeout_seconds": 300.0
+}

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+runtime/
+logs/
+*.log
+*.pid
+*.tmp
