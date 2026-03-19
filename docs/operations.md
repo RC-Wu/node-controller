@@ -30,6 +30,13 @@ Before queueing a new real training job, inspect:
 
 Do not blindly submit duplicate work if another automation or worker already enqueued an equivalent spec.
 
+## Slice Aware Concurrency
+
+- The scheduler is opportunistic first-fit over the queued specs, not strict FIFO.
+- If the first queued job wants `0,1,2,3` but only `4,5,6,7` are free, a later smaller job may still launch first if its slice fits.
+- For deterministic placement, set explicit `gpu_indices`.
+- For flexible placement inside a safe pool, set `gpu_count` plus `allowed_gpu_indices`.
+
 ## No Platform Stop Permission Workaround
 
 If the current account cannot call `volc ml_task cancel`, do not assume the controller is uncontrollable.

@@ -1,5 +1,6 @@
 {
   "job_id": "smoke_gpu_probe",
+  "gpu_indices": ["0"],
   "command": [
     "bash",
     "-lc",

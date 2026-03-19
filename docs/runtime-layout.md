@@ -28,7 +28,7 @@ runtime/platform_<task_id>/
 - `running/*.json`
   - controller-owned active job specs
 - `running/*.meta.json`
-  - active child pid, command, log path, timeout
+  - active child pid, command, timeout, and assigned GPU slice
 - `done/*.result.json`
   - successful completion record
 - `failed/*.result.json`
@@ -44,7 +44,7 @@ runtime/platform_<task_id>/
 - `logs/jobs/<job_id>.log`
   - child stdout/stderr
 - `state/controller_state.json`
-  - latest controller heartbeat and current active job
+  - latest controller heartbeat, `active_jobs`, and current GPU occupancy
 - `logs/controller_heartbeat.jsonl`
   - append-only heartbeat and job transition events
 

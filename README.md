@@ -24,7 +24,23 @@ This lets you:
 1. occupy a node once
 2. keep the controller alive
 3. submit follow-up jobs by writing JSON into the queue
-4. validate progress from vePFS even when platform container logs are permission-blocked
+4. run multiple independent jobs concurrently when their GPU slices do not overlap
+5. validate progress from vePFS even when platform container logs are permission-blocked
+
+## GPU Slice Aware Scheduling
+
+The controller now understands optional job-spec fields:
+
+- `gpu_indices`
+  - exact GPU slice to reserve, e.g. `["0", "1"]`
+- `gpu_count`
+  - number of GPUs to allocate if no exact slice is given
+- `allowed_gpu_indices`
+  - eligible GPU pool for first-fit allocation
+- `priority`
+  - higher values are considered earlier when multiple queued jobs fit
+
+If a job requests no GPUs, it is treated as CPU/non-exclusive work.
 
 ## Repo Layout
 

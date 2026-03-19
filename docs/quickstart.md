@@ -78,7 +78,36 @@ Required fields:
 - `env`
 - `timeout_seconds`
 
+Optional GPU-scheduling fields:
+
+- `gpu_indices`
+- `gpu_count`
+- `allowed_gpu_indices`
+- `priority`
+
 Use [sample_queue_job.json](/F:/InformationAndCourses/Code/node-controller/examples/sample_queue_job.json) as the starting shape.
+
+Examples:
+
+```bash
+python submit_job.py \
+  --root /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto/runtime/platform_<task_id> \
+  --job-id train_on_01 \
+  --gpu-indices 0,1 \
+  --workdir /dev_vepfs/rc_wu \
+  --timeout-seconds 604800 \
+  -- bash -lc "echo train_on_01"
+```
+
+```bash
+python submit_job.py \
+  --root /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto/runtime/platform_<task_id> \
+  --job-id dino_on_23 \
+  --gpu-indices 2,3 \
+  --workdir /dev_vepfs/rc_wu \
+  --timeout-seconds 432000 \
+  -- bash -lc "echo dino_on_23"
+```
 
 ## 6. Observe
 
