@@ -1,63 +1,121 @@
 # node-controller
 
-Queue-driven controller for a long-lived Volc custom task.
+Queue-driven GPU job scheduler for long-lived Volc ML Platform custom tasks.
 
-This repo packages the controller/dispatcher pattern that was used to keep a Volc 8-GPU node occupied and accept later jobs through a vePFS queue instead of post-launch SSH takeover.
+## v3 — Fork-Based Architecture (slurm-style)
 
-## What It Does
+```
+controller.py (immortal daemon — never touches job code)
+  └── fork → job_supervisor.py (per-job, isolated process)
+                └── exec → training command (with CUDA_VISIBLE_DEVICES set)
+```
 
-The controller runs inside one long-lived ML Platform task and watches a shared runtime root:
+The controller runs inside one long-lived ML Platform task and watches a shared runtime root on vePFS.
+It forks a `job_supervisor.py` for each job — if the training crashes or the supervisor segfaults,
+only that job dies. The controller continues running and releases the GPUs.
 
-- `jobs/queue/`: drop one JSON spec per job
-- `jobs/running/`: controller-owned running specs and metadata
-- `jobs/done/`: finished specs and result JSONs
-- `jobs/failed/`: failed specs and result JSONs
-- `logs/jobs/<job_id>.log`: per-job stdout/stderr
-- `state/controller_state.json`: current controller heartbeat and active job
+### Features
 
-This lets you:
+- **Multi-GPU parallelism**: Run multiple jobs concurrently with automatic GPU pool allocation (contiguous-first for NVLink)
+- **Job-level kill**: Drop a file in `jobs/kill/<job_id>` to kill a specific job without cancelling the whole Volc task
+- **Fork-based isolation**: Controller never opens job log files, never runs job code — zero exposure to job failures
+- **Process group kill**: `os.setsid` + `os.killpg` ensures DDP child workers are cleaned up
+- **Line-buffered stdout**: `stdbuf -oL` wrapper for near-real-time log tailing over vePFS
+- **GPU status monitoring**: `nvidia-smi` probe in every heartbeat (util%, memory, temperature)
+- **VEPFS quota handling**: Detects disk-full, pauses with retry loop, auto-resumes when space freed
+- **Graceful SIGTERM**: Kills all active supervisors before controller exits, writes final shutdown state
+- **Structured logging**: Timestamped logs to `logs/controller.log` (file + stderr)
+- **Exception resilience**: Unhandled exceptions in main loop are logged and recovered with backoff
 
-1. occupy a node once
-2. keep the controller alive
-3. submit follow-up jobs by writing JSON into the queue
-4. validate progress from vePFS even when platform container logs are permission-blocked
+### Runtime Layout
+
+```
+runtime/platform_<TASK_ID>/
+├── jobs/
+│   ├── queue/          # Drop JSON specs here to submit jobs
+│   ├── running/        # Controller moves specs here while running
+│   ├── done/           # Completed jobs (exit 0)
+│   ├── failed/         # Failed/killed jobs
+│   └── kill/           # Drop any file named <job_id> to kill that job
+├── logs/
+│   ├── controller.log              # Controller structured log
+│   ├── controller_heartbeat.jsonl  # Event timeline
+│   └── jobs/<job_id>.log           # Per-job stdout/stderr
+└── state/
+    └── controller_state.json       # Heartbeat: active jobs, GPU pool, GPU status
+```
+
+### Job Spec Format
+
+```json
+{
+  "job_id": "train_v1",
+  "command": ["bash", "scripts/train.sh"],
+  "gpus": 4,
+  "workdir": "/path/to/workdir",
+  "env": {"HYDRA_FULL_ERROR": "1"},
+  "timeout_seconds": 432000
+}
+```
+
+- `gpus`: Number of GPUs needed (default: all). Controller auto-assigns indices via `CUDA_VISIBLE_DEVICES`.
+- `timeout_seconds`: Kill job after this many seconds (0 = no timeout).
+
+### Usage
+
+```bash
+# Submit a job
+python submit_job.py --runtime-root $RUNTIME \
+  --job-id train_v1 --gpus 4 \
+  --command bash scripts/train.sh \
+  --workdir /path/to/code
+
+# Kill a running job
+python submit_job.py --runtime-root $RUNTIME --kill train_v1
+
+# Check controller status
+python submit_job.py --runtime-root $RUNTIME --status
+
+# Or just read the state file
+cat $RUNTIME/state/controller_state.json
+```
+
+### Controller State Example
+
+```json
+{
+  "updated_at_epoch": 1774001696.69,
+  "pid": 2124,
+  "status": "running",
+  "total_gpus": 8,
+  "free_gpus": [4, 5, 6, 7],
+  "active_jobs": [
+    {
+      "job_id": "train_v1",
+      "gpus": [0, 1, 2, 3],
+      "supervisor_pid": 2480,
+      "started_at_epoch": 1774001700.0,
+      "elapsed_seconds": 3600.0
+    }
+  ],
+  "gpu_status": [
+    {"index": 0, "util_pct": 98, "mem_used_mb": 74000, "mem_total_mb": 81920, "temp_c": 65},
+    ...
+  ]
+}
+```
 
 ## Repo Layout
 
-- `controller.py`: main dispatcher loop
-- `submit_job.py`: helper that writes a JSON spec into the queue
-- `volc_dispatcher_entry.sh`: task entrypoint that builds the runtime root and starts the controller
-- `examples/controller_task_min_submit.yaml`: minimal ML task submit config using a tiny `UserCodePath`
-- `examples/controller_task_full_submit.yaml`: historical full-sandbox submit config
-- `examples/min_submit_controller.py`: example file set for the tiny submit directory
-- `examples/min_submit_volc_dispatcher_entry.sh`: example file set for the tiny submit directory
-- `examples/sample_queue_job.json`: minimal job spec example
-- `docs/quickstart.md`: end-to-end usage on `dev-intern-02`
-- `docs/runtime-layout.md`: runtime file layout and semantics
-- `docs/operations.md`: practical caveats and recovery notes
+- `controller.py`: Main daemon — polls queue, manages GPU pool, forks supervisors, writes heartbeat
+- `job_supervisor.py`: Per-job process — sets up env, launches training, monitors timeout, forwards SIGTERM
+- `submit_job.py`: CLI helper for submitting, killing, and checking jobs
+- `volc_dispatcher_entry.sh`: Volc task entrypoint (creates runtime dirs, launches controller)
+- `examples/`: Minimal Volc task submit configs
 
-## Fast Start
+## Deployment
 
-1. Prepare a tiny submit directory that contains only:
-   - `controller.py`
-   - `volc_dispatcher_entry.sh`
-2. Submit a long-lived task with `examples/controller_task_min_submit.yaml`.
-3. Wait until the task is `Running`.
-4. Validate the controller by queueing a tiny smoke job.
-5. Only after the smoke reaches `done/`, start queueing real training jobs.
-
-See [quickstart.md](/F:/InformationAndCourses/Code/node-controller/docs/quickstart.md) for exact commands.
-
-## Why The Tiny Submit Directory Matters
-
-The original full-sandbox submit path eventually hit ML Platform upload limits (`size/file_num exceeded limit`).
-
-The reliable pattern is:
-
-- keep the live sandbox on vePFS
-- keep the task `Entrypoint` pointed at the absolute vePFS path
-- submit from a tiny `UserCodePath` that only includes the bootstrap files
-
-## Timeout
-
-The historical examples were first run with `ActiveDeadlineSeconds=43200` and later changed to a much larger value for long-lived occupancy. The examples in this repo use `432000` seconds to avoid the earlier 12-hour platform stop.
+1. Place all files on shared storage (vePFS)
+2. Set `Entrypoint` in your Volc YAML to `bash /path/to/volc_dispatcher_entry.sh`
+3. Submit: `volc ml_task submit -c your_task.yaml`
+4. Queue jobs by writing JSON to `runtime/.../jobs/queue/`
