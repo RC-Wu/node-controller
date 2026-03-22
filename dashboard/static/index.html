@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node Controller 管理面板</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page-bg" aria-hidden="true"></div>
+  <div class="page-grid" aria-hidden="true"></div>
+
+  <main class="app-shell" id="app">
+    <header class="hero panel">
+      <div class="hero-copy">
+        <p class="eyebrow">GPU 任务控制器</p>
+        <h1>Node Controller</h1>
+        <p class="lede">一个无需构建链的运维面板，用来查看 controller 健康度、GPU 占用、队列压力、任务历史以及实时控制动作。</p>
+
+        <div class="status-row" aria-label="Controller 状态">
+          <span class="pill" id="health-pill">正在检查健康状态</span>
+          <span class="pill" id="runtime-pill">Runtime: -</span>
+          <span class="pill" id="lease-pill">Lease: -</span>
+          <span class="pill" id="write-pill">控制权限: -</span>
+        </div>
+
+        <div class="hero-actions">
+          <button class="button primary" type="button" data-action="refresh">立即刷新</button>
+          <button class="button" type="button" data-action="scroll-jobs">跳到任务区</button>
+          <button class="button" type="button" data-action="toggle-history">切换历史视图</button>
+        </div>
+      </div>
+
+      <div class="hero-side">
+        <div class="hero-card">
+          <span class="hero-card-label">Controller</span>
+          <strong id="controller-label">加载中</strong>
+          <small id="controller-meta">等待摘要信息</small>
+        </div>
+        <div class="hero-card">
+          <span class="hero-card-label">最近心跳</span>
+          <strong id="heartbeat-label">加载中</strong>
+          <small id="heartbeat-meta">暂时还没有数据</small>
+        </div>
+        <div class="hero-card">
+          <span class="hero-card-label">同步状态</span>
+          <strong id="sync-label">加载中</strong>
+          <small id="sync-meta">历史和任务数据会显示在这里</small>
+        </div>
+      </div>
+    </header>
+
+    <section class="metrics" aria-label="Controller 指标">
+      <article class="metric-card metric-queue">
+        <span>队列</span>
+        <strong id="metric-queue">-</strong>
+        <small id="metric-queue-meta">排队中的任务</small>
+      </article>
+      <article class="metric-card metric-running">
+        <span>运行中</span>
+        <strong id="metric-running">-</strong>
+        <small id="metric-running-meta">活跃任务</small>
+      </article>
+      <article class="metric-card metric-done">
+        <span>完成</span>
+        <strong id="metric-done">-</strong>
+        <small id="metric-done-meta">成功结束</small>
+      </article>
+      <article class="metric-card metric-failed">
+        <span>失败</span>
+        <strong id="metric-failed">-</strong>
+        <small id="metric-failed-meta">终态失败</small>
+      </article>
+      <article class="metric-card metric-cancelled">
+        <span>取消</span>
+        <strong id="metric-cancelled">-</strong>
+        <small id="metric-cancelled-meta">人工或启动前取消</small>
+      </article>
+      <article class="metric-card metric-control">
+        <span>控制队列</span>
+        <strong id="metric-control">-</strong>
+        <small id="metric-control-meta">等待中的管理请求</small>
+      </article>
+    </section>
+
+    <section class="split">
+      <article class="panel gpu-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow small">硬件</p>
+            <h2>GPU 面板</h2>
+          </div>
+          <div class="legend" id="gpu-legend"></div>
+        </div>
+        <div id="gpu-grid" class="gpu-grid" aria-live="polite"></div>
+      </article>
+
+      <aside class="panel control-panel" id="control-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow small">控制</p>
+            <h2>动作</h2>
+          </div>
+          <span class="pill subtle" id="control-state-pill">空闲</span>
+        </div>
+
+        <div class="quick-actions">
+          <button class="chip-button" type="button" data-control-preset="cancel_active_job">取消活跃任务</button>
+          <button class="chip-button" type="button" data-control-preset="purge_queue">清空队列</button>
+          <button class="chip-button danger" type="button" data-control-preset="drain_and_stop">排空后停止</button>
+              <button class="chip-button danger" type="button" data-control-preset="retire_controller">Retire Controller</button>
+        </div>
+
+        <form id="control-form" class="form-grid">
+          <label>
+            动作
+            <select id="control-action" name="action">
+              <option value="cancel_active_job">取消活跃任务</option>
+              <option value="purge_queue">清空队列</option>
+              <option value="drain_and_stop">排空后停止</option>
+              <option value="retire_controller">Retire Controller</option>
+            </select>
+          </label>
+          <label>
+            原因
+            <input id="control-reason" name="reason" placeholder="填写操作原因">
+          </label>
+          <div class="form-row">
+            <label>
+              任务 ID
+              <input id="control-job-ids" name="job_ids" placeholder="可选，逗号分隔">
+            </label>
+            <label>
+              信号
+              <input id="control-signal" name="signal" value="TERM">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              宽限秒数
+              <input id="control-grace" name="grace_seconds" type="number" min="0" step="1" value="15">
+            </label>
+            <label class="check">
+              <input id="control-purge" name="purge_queue" type="checkbox">
+              <span>清空队列</span>
+            </label>
+          </div>
+          <label class="check">
+            <input id="control-cancel" name="cancel_active_job" type="checkbox">
+            <span>取消活跃任务</span>
+          </label>
+          <div class="actions-row">
+            <button class="button primary" type="submit">提交控制请求</button>
+            <button class="button" type="button" data-action="reset-control-form">重置</button>
+          </div>
+        </form>
+
+        <div class="activity-card">
+          <div class="activity-head">
+            <h3>近期 Controller 活动</h3>
+            <button class="inline-link" type="button" data-action="toggle-activity">显示/隐藏</button>
+          </div>
+          <div id="activity-feed" class="activity-feed"></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="charts split">
+      <article class="panel chart-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow small">历史</p>
+            <h2>队列与运行趋势</h2>
+          </div>
+          <span class="pill subtle">最近 300 条</span>
+        </div>
+        <canvas id="history-chart" class="chart-canvas" width="960" height="300" aria-label="队列与运行趋势图" role="img"></canvas>
+      </article>
+
+      <article class="panel chart-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow small">快照</p>
+            <h2>GPU 利用率</h2>
+          </div>
+          <span class="pill subtle">实时</span>
+        </div>
+        <canvas id="gpu-chart" class="chart-canvas" width="960" height="300" aria-label="GPU 利用率图" role="img"></canvas>
+      </article>
+    </section>
+
+    <section class="panel jobs-panel" id="jobs-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow small">任务</p>
+          <h2>近期任务表</h2>
+        </div>
+        <div class="filter-row" id="job-filters" role="tablist" aria-label="任务筛选">
+          <button class="chip-button is-active" type="button" data-filter="all">全部</button>
+          <button class="chip-button" type="button" data-filter="running">运行中</button>
+          <button class="chip-button" type="button" data-filter="queue">排队中</button>
+          <button class="chip-button" type="button" data-filter="done">已完成</button>
+          <button class="chip-button" type="button" data-filter="failed">失败</button>
+          <button class="chip-button" type="button" data-filter="cancelled">已取消</button>
+        </div>
+      </div>
+
+      <div class="jobs-grid">
+        <article class="table-card">
+          <div class="table-head">
+            <div>
+              <h3>活跃与排队</h3>
+              <p id="active-job-caption">当前工作项</p>
+            </div>
+            <span class="pill subtle" id="active-job-count">0</span>
+          </div>
+          <div class="table-wrap">
+            <table class="job-table">
+              <thead>
+                <tr>
+                  <th>任务</th>
+                  <th>状态</th>
+                  <th>GPU</th>
+                  <th>时长</th>
+                  <th>工作目录</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="active-jobs-body"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="table-card">
+          <div class="table-head">
+            <div>
+              <h3>终态任务</h3>
+              <p id="terminal-job-caption">完成、失败与取消任务</p>
+            </div>
+            <span class="pill subtle" id="terminal-job-count">0</span>
+          </div>
+          <div class="table-wrap">
+            <table class="job-table">
+              <thead>
+                <tr>
+                  <th>任务</th>
+                  <th>状态</th>
+                  <th>GPU</th>
+                  <th>时长</th>
+                  <th>工作目录</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="terminal-jobs-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="log-drawer" id="log-drawer" aria-hidden="true">
+    <div class="drawer-top">
+      <div>
+        <p class="eyebrow small">任务日志</p>
+        <h2 id="drawer-title">请选择任务</h2>
+        <p id="drawer-meta">尚未选择任务</p>
+      </div>
+      <button class="icon-button" type="button" data-action="close-drawer" aria-label="关闭日志抽屉">×</button>
+    </div>
+
+    <div class="drawer-meta-grid">
+      <div class="drawer-chip">
+        <span>状态</span>
+        <strong id="drawer-status">-</strong>
+      </div>
+      <div class="drawer-chip">
+        <span>任务 ID</span>
+        <strong id="drawer-job-id">-</strong>
+      </div>
+      <div class="drawer-chip">
+        <span>GPU</span>
+        <strong id="drawer-gpu">-</strong>
+      </div>
+      <div class="drawer-chip">
+        <span>最近更新</span>
+        <strong id="drawer-updated">-</strong>
+      </div>
+    </div>
+
+    <div class="drawer-controls">
+      <label class="drawer-reason">
+        终止原因
+        <input id="drawer-kill-reason" placeholder="填写终止原因">
+      </label>
+      <div class="drawer-buttons">
+        <button class="button primary" type="button" id="drawer-kill-button" data-action="kill-selected">终止任务</button>
+        <button class="button" type="button" data-action="reload-selected-log">重新加载日志</button>
+      </div>
+    </div>
+
+    <section class="drawer-section">
+      <div class="drawer-section-head">
+        <h3>日志尾部</h3>
+        <span class="pill subtle" id="drawer-log-state">空闲</span>
+      </div>
+      <pre id="drawer-log" class="log-output">请选择任务以查看日志尾部。</pre>
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-head">
+        <h3>任务事件</h3>
+        <span class="pill subtle">事件载荷</span>
+      </div>
+      <div id="drawer-events" class="drawer-events"></div>
+    </section>
+  </aside>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+STATUS_SCRIPT = REPO_ROOT / "scripts" / "controller_status.py"
+SUPERVISOR_SCRIPT = REPO_ROOT / "scripts" / "controller_supervisor.py"
+
+
+def load_module(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ControllerToolingTest(unittest.TestCase):
+    def test_status_script_reads_sandbox_pointer_and_flags_untracked_gpu(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="node-controller-status-") as tmpdir:
+            sandbox_root = Path(tmpdir)
+            runtime_root = sandbox_root / "runtime" / "platform_t-20260321-abcde"
+            for path in [
+                runtime_root / "state",
+                runtime_root / "jobs" / "queue",
+                runtime_root / "jobs" / "running",
+                runtime_root / "jobs" / "done",
+                runtime_root / "jobs" / "failed",
+                runtime_root / "jobs" / "cancelled",
+                runtime_root / "jobs" / "kill",
+                runtime_root / "control" / "queue",
+                runtime_root / "control" / "done",
+                runtime_root / "control" / "failed",
+            ]:
+                path.mkdir(parents=True, exist_ok=True)
+
+            (runtime_root / "jobs" / "queue" / "queued.json").write_text("{}", encoding="utf-8")
+            (runtime_root / "jobs" / "done" / "done.result.json").write_text("{}", encoding="utf-8")
+            (runtime_root / "runtime_unused.json").write_text("{}", encoding="utf-8")
+
+            pointer = {
+                "runtime_root": str(runtime_root),
+                "updated_at_epoch": time.time(),
+            }
+            (sandbox_root / "runtime").mkdir(parents=True, exist_ok=True)
+            (sandbox_root / "runtime" / "current_runtime.json").write_text(
+                json.dumps(pointer, indent=2),
+                encoding="utf-8",
+            )
+
+            controller_state = {
+                "updated_at_epoch": time.time(),
+                "pid": 2164,
+                "hostname": "dev-intern-02",
+                "active_jobs": [
+                    {
+                        "job_id": "train_on_0",
+                        "allocated_gpu_indices": ["0"],
+                        "pid": 999,
+                        "timeout_seconds": 600,
+                        "workdir": "/dev_vepfs/rc_wu",
+                    }
+                ],
+                "active_job_count": 1,
+                "gpu_status": [
+                    {"index": 0, "util_pct": 93, "mem_used_mb": 28000, "mem_total_mb": 81920, "temp_c": 64},
+                    {"index": 1, "util_pct": 87, "mem_used_mb": 25000, "mem_total_mb": 81920, "temp_c": 61},
+                ],
+                "gpu_processes": [
+                    {"gpu_index": 0, "pid": 999, "controller_job_id": "train_on_0"},
+                    {"gpu_index": 1, "pid": 12345, "controller_job_id": None},
+                ],
+                "managed_gpu_indices": ["0", "1"],
+            }
+            (runtime_root / "state" / "controller_state.json").write_text(
+                json.dumps(controller_state, indent=2),
+                encoding="utf-8",
+            )
+            (runtime_root / "state" / "controller_lease.json").write_text(
+                json.dumps({"updated_at_epoch": time.time()}, indent=2),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(STATUS_SCRIPT), "--sandbox-root", str(sandbox_root)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                cwd=str(REPO_ROOT),
+            )
+
+            self.assertIn(str(runtime_root), result.stdout)
+            self.assertIn("train_on_0", result.stdout)
+            self.assertIn("external_or_untracked", result.stdout)
+            self.assertIn("queue=1", result.stdout)
+
+    def test_supervisor_helpers_extract_task_name_and_id(self) -> None:
+        module = load_module(SUPERVISOR_SCRIPT, "controller_supervisor_test_helpers")
+        yaml_text = 'TaskName: "zoom_dino_volc_dispatcher_proto_20260318_meshovernight_1n"\nPriority: 4\n'
+        self.assertEqual(
+            module.extract_task_name_from_yaml_text(yaml_text),
+            "zoom_dino_volc_dispatcher_proto_20260318_meshovernight_1n",
+        )
+        submit_text = "submitted task t-20260321023221-92v8s successfully"
+        self.assertEqual(module.extract_task_id_from_text(submit_text), "t-20260321023221-92v8s")
+
+    def test_supervisor_dry_run_reports_submit_intent(self) -> None:
+        module = load_module(SUPERVISOR_SCRIPT, "controller_supervisor_test_dryrun")
+        with tempfile.TemporaryDirectory(prefix="node-controller-supervisor-") as tmpdir:
+            sandbox_root = Path(tmpdir)
+            submit_config = sandbox_root / "submit.yaml"
+            submit_config.parent.mkdir(parents=True, exist_ok=True)
+            submit_config.write_text('TaskName: "demo_controller_task"\n', encoding="utf-8")
+            args = SimpleNamespace(
+                sandbox_root=sandbox_root,
+                submit_config=submit_config,
+                task_name="",
+                volc_binary="volc",
+                poll_seconds=1.0,
+                healthy_max_age_seconds=30.0,
+                dry_run=True,
+                once=True,
+            )
+            with mock.patch.object(module, "list_running_task_ids", return_value=[]):
+                state = module.supervise_once(args)
+            self.assertEqual(state["action"], "would_submit_new_task")
+            self.assertEqual(state["task_name"], "demo_controller_task")
+            self.assertFalse(state["controller_healthy"])
+
+    def test_supervisor_syncs_runtime_pointer(self) -> None:
+        module = load_module(SUPERVISOR_SCRIPT, "controller_supervisor_test_pointer")
+        with tempfile.TemporaryDirectory(prefix="node-controller-pointer-") as tmpdir:
+            sandbox_root = Path(tmpdir)
+            runtime_root = sandbox_root / "runtime" / "platform_t-20260321-abcde"
+            state = {
+                "updated_at_epoch": 123.0,
+                "runtime_root": str(runtime_root),
+                "task_name": "demo_controller_task",
+                "action": "healthy_runtime",
+                "task_id": "t-20260321-abcde",
+            }
+            module.sync_current_runtime_pointer(sandbox_root, state)
+            pointer_path = sandbox_root / "runtime" / "current_runtime.json"
+            self.assertTrue(pointer_path.exists())
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            self.assertEqual(pointer["runtime_root"], str(runtime_root))
+            self.assertEqual(pointer["task_id"], "t-20260321-abcde")
+
+            module.sync_current_runtime_pointer(
+                sandbox_root,
+                {
+                    "updated_at_epoch": 124.0,
+                    "runtime_root": None,
+                    "task_name": "demo_controller_task",
+                    "action": "would_submit_new_task",
+                    "task_id": None,
+                },
+            )
+            self.assertFalse(pointer_path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
