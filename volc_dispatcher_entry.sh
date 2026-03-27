@@ -90,6 +90,12 @@ ensure_public_queue_access() {
   if [ -d "$RUNTIME_ROOT/jobs/queue" ]; then
     chmod 1777 "$RUNTIME_ROOT/jobs/queue" >/dev/null 2>&1 || true
   fi
+  if [ -d "$RUNTIME_ROOT/control/queue" ]; then
+    chmod 1777 "$RUNTIME_ROOT/control/queue" >/dev/null 2>&1 || true
+  fi
+  if [ -d "$RUNTIME_ROOT/jobs/kill" ]; then
+    chmod 1777 "$RUNTIME_ROOT/jobs/kill" >/dev/null 2>&1 || true
+  fi
   if [ -e "$SUPERVISOR_STATUS_PATH" ]; then
     chmod 644 "$SUPERVISOR_STATUS_PATH" >/dev/null 2>&1 || true
   fi
