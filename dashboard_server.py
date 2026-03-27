@@ -166,8 +166,15 @@ def make_handler(service: DashboardService):
                 return
             body = file_path.read_bytes()
             content_type, _ = mimetypes.guess_type(str(file_path))
+            content_type = content_type or "application/octet-stream"
+            if content_type.startswith("text/") or content_type in {
+                "application/javascript",
+                "image/svg+xml",
+            }:
+                content_type = f"{content_type}; charset=utf-8"
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", f"{content_type or 'application/octet-stream'}")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
