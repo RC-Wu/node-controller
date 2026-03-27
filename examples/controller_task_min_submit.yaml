@@ -1,5 +1,5 @@
 TaskName: "zoom_dino_volc_dispatcher_proto_20260318_meshovernight_1n"
-Description: "Occupy one A800 node overnight with the long-lived controller prototype for mesh VAE follow-up jobs."
+Description: "Occupy one A800 node for up to 15 days with the long-lived controller prototype for follow-up jobs."
 UserCodePath: "/dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto/min_submit"
 RemoteMountCodePath: "/root/code"
 Entrypoint: "bash /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto/volc_dispatcher_entry.sh"
@@ -11,15 +11,24 @@ TaskRoleSpecs:
     RoleReplicas: 1
     Flavor: "ml.hpcpni2l.28xlarge"
 Priority: 4
-ActiveDeadlineSeconds: "432000"
+ActiveDeadlineSeconds: "1296000"
 Envs:
   - Name: "CONTROLLER_POLL_SECONDS"
     Value: "2"
   - Name: "CONTROLLER_HEARTBEAT_SECONDS"
     Value: "10"
+  - Name: "CONTROLLER_RUN_AS_ROOT"
+    Value: "1"
+  - Name: "CONTROLLER_REQUIRED_MOUNTS"
+    Value: "/all-repacked-3d-data/v1/glb"
 Storages:
   - Type: "Vepfs"
     MountPath: "/dev_vepfs/rc_wu"
     SubPath: "/rc_wu"
     VepfsId: "vepfs-cnsh40279a6c9ba2"
+  - Type: "TosFuse"
+    MountPath: "/all-repacked-3d-data/v1/glb"
+    Bucket: "all-repacked-3d-data"
+    Prefix: "/v1/glb"
+    ReadOnly: true
 AccessType: "Public"

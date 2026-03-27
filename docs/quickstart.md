@@ -14,6 +14,14 @@ The controller task writes its runtime state under:
 runtime/platform_<task_id>/
 ```
 
+The stable discovery files live at:
+
+```bash
+runtime/current_runtime.json
+runtime/state/controller_state.json
+runtime/state/controller_lease.json
+```
+
 ## 2. Prepare The Tiny Submit Directory
 
 Create a tiny submit directory and copy only:
@@ -40,6 +48,8 @@ volc ml_task submit -c /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/
 
 Prefer the minimal submit YAML because it avoids code upload limits.
 
+The examples now use a `15`-day `ActiveDeadlineSeconds` so the controller can survive longer-lived occupancy waves.
+
 ## 4. Validate The Controller
 
 Do not trust `Running` alone. Queue a smoke job and confirm queue -> done.
@@ -61,6 +71,20 @@ Then inspect:
 - `logs/jobs/smoke_gpu_probe.log`
 
 If the smoke moves to `done/` and the log looks sane, the controller is usable.
+
+## 4.5 Validate Restart Adoption
+
+Before trusting the runtime for long jobs, validate one forced restart:
+
+1. enqueue a long-ish smoke job, for example `sleep 60`
+2. stop the controller process inside the task once
+3. start the controller again against the same runtime root
+4. confirm:
+   - the child reappears in `state/controller_state.json`
+   - the same GPU slice stays occupied
+   - the result still lands in `jobs/done/` after the child exits
+
+If restart adoption fails here, do not queue overnight training yet.
 
 ## 5. Submit Real Jobs
 
@@ -113,13 +137,40 @@ python submit_job.py \
 
 Use vePFS runtime files as the source of truth:
 
+- `runtime/current_runtime.json`
+- `runtime/state/controller_state.json`
+- `runtime/state/controller_lease.json`
 - `state/controller_state.json`
 - `logs/controller_heartbeat.jsonl`
 - `jobs/running/*.meta.json`
 - `jobs/done/*.result.json`
 - `jobs/failed/*.result.json`
 
+Also inspect:
+
+- `state/controller_lease.json`
+  - confirms which controller pid/host currently owns the runtime root
+- `jobs/running/*.meta.json`
+  - confirms the child pid, start tick, and allocated GPU slice that will be re-adopted after restart
+
 This path still works when `volc ml_task logs` is permission-blocked.
+
+For a lightweight `nvidia-smi`-style view:
+
+```bash
+python submit_job.py \
+  --root /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto \
+  --status-summary
+```
+
+For watch mode:
+
+```bash
+python submit_job.py \
+  --root /dev_vepfs/rc_wu/zoom-in-render-dino-classfier/sandboxes/20260318_volc_dispatcher_proto \
+  --status-summary \
+  --status-watch-seconds 5
+```
 
 ## 7. Control The Controller Without Platform Stop Permission
 

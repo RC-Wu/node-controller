@@ -9,7 +9,8 @@ runtime/platform_<task_id>/
 |  |- running/
 |  |- done/
 |  |- failed/
-|  `- cancelled/
+|  |- cancelled/
+|  `- kill/
 |- control/
 |  |- queue/
 |  |- done/
@@ -18,7 +19,8 @@ runtime/platform_<task_id>/
 |  |- controller_heartbeat.jsonl
 |  `- jobs/
 `- state/
-   `- controller_state.json
+   |- controller_state.json
+   `- controller_lease.json
 ```
 
 ## Semantics
@@ -35,6 +37,8 @@ runtime/platform_<task_id>/
   - failed completion record
 - `cancelled/*.result.json`
   - queued job cancelled before launch
+- `kill/<job_id>.json`
+  - compatibility kill signal for queued or running jobs
 - `control/queue/*.json`
   - admin requests such as `cancel_active_job`, `purge_queue`, `retire_controller`
 - `control/done/*.result.json`
@@ -44,10 +48,29 @@ runtime/platform_<task_id>/
 - `logs/jobs/<job_id>.log`
   - child stdout/stderr
 - `state/controller_state.json`
-  - latest controller heartbeat, `active_jobs`, and current GPU occupancy
+  - latest controller heartbeat, `active_jobs`, current GPU occupancy, and `gpu_status`
+- `state/controller_lease.json`
+  - runtime-root ownership lease for restart-safe single-controller operation
 - `logs/controller_heartbeat.jsonl`
   - append-only heartbeat and job transition events
 
 ## Queue Permissions
 
 The controller attempts to set `jobs/queue` to sticky world-writable so an external dev-machine user can enqueue jobs through vePFS without taking ownership of the rest of the runtime tree.
+
+## Sandbox-Level Stable Paths
+
+Outside the task-specific runtime root, the sandbox also carries stable discovery files:
+
+```text
+<sandbox_root>/runtime/current_runtime.json
+<sandbox_root>/runtime/state/controller_state.json
+<sandbox_root>/runtime/state/controller_lease.json
+```
+
+- `current_runtime.json`
+  - controller-owned pointer to the active `platform_<task_id>` runtime
+- `runtime/state/controller_state.json`
+  - mirrored latest controller heartbeat for callers that only know the sandbox root
+- `runtime/state/controller_lease.json`
+  - mirrored latest lease for the currently published runtime
