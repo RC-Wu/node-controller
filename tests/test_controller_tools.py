@@ -149,6 +149,131 @@ class ControllerToolingTest(unittest.TestCase):
         )
         self.assertIsNone(allocation)
 
+    def test_startup_gpu_shortage_wait_mode_stays_alive(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_startup_wait_mode_test")
+        with tempfile.TemporaryDirectory(prefix="node-controller-startup-wait-") as tmpdir:
+            root = Path(tmpdir) / "runtime"
+            root.mkdir(parents=True, exist_ok=True)
+            layout = module.build_layout(root)
+            args = SimpleNamespace(
+                root=root,
+                poll_seconds=0.0,
+                heartbeat_seconds=9999.0,
+                managed_gpu_indices="0,1,2,3,4,5,6,7",
+                supervisor_grace_seconds=15.0,
+                enable_compat_kill_queue=False,
+                foreign_gpu_memory_threshold_mb=2048,
+                startup_min_schedulable_gpu_count=8,
+                startup_unhealthy_action="wait",
+                once=True,
+            )
+            startup_availability = {
+                "active_gpu_indices": [],
+                "active_untracked_gpu_indices": [],
+                "externally_blocked_gpu_indices": ["4", "5", "6", "7"],
+                "schedulable_gpu_indices": ["0", "1", "2", "3"],
+                "unavailable_gpu_indices": ["4", "5", "6", "7"],
+                "free_gpu_indices": ["0", "1", "2", "3"],
+                "gpu_external_block_reasons": {"4": ["foreign_proc pid=999 name=[Not Found] mem=45076"]},
+            }
+            state_payloads: list[dict[str, object]] = []
+            event_names: list[str] = []
+
+            def record_state(_layout, payload, *, acquired_at_epoch=None):
+                state_payloads.append(payload.copy())
+
+            def record_event(_layout, event, **_kwargs):
+                event_names.append(event)
+
+            with (
+                mock.patch.object(module, "parse_args", return_value=args),
+                mock.patch.object(module, "acquire_controller_lease", return_value=123.0),
+                mock.patch.object(module, "release_controller_lease"),
+                mock.patch.object(module, "refresh_controller_lease"),
+                mock.patch.object(module, "detect_managed_gpu_indices", return_value=["0", "1", "2", "3", "4", "5", "6", "7"]),
+                mock.patch.object(module, "adopt_running_jobs", return_value=[]),
+                mock.patch.object(module, "probe_gpu_status", return_value=[]),
+                mock.patch.object(module, "probe_gpu_processes", return_value=[]),
+                mock.patch.object(module, "summarize_gpu_availability", return_value=startup_availability),
+                mock.patch.object(module, "harvest_finished_runs", side_effect=lambda _layout, runs: runs),
+                mock.patch.object(module, "next_control_request", return_value=None),
+                mock.patch.object(module, "process_kill_requests", side_effect=lambda _layout, runs, enabled=False: (runs, False)),
+                mock.patch.object(module, "dispatch_launchable_jobs", side_effect=lambda _layout, runs, *_args, **_kwargs: runs),
+                mock.patch.object(module, "next_visible_json", return_value=None),
+                mock.patch.object(module, "write_controller_state_snapshots", side_effect=record_state),
+                mock.patch.object(module, "append_controller_event", side_effect=record_event),
+                mock.patch.object(module, "append_jsonl"),
+            ):
+                rc = module.main()
+
+            self.assertEqual(rc, 0)
+            self.assertIn("controller_startup_waiting_for_gpus", event_names)
+            startup_states = [payload for payload in state_payloads if payload.get("startup_health_status") == "waiting"]
+            self.assertTrue(startup_states)
+            self.assertEqual(startup_states[0]["last_control_action"], "startup_waiting_for_gpus")
+            self.assertEqual(startup_states[0]["startup_health_action"], "wait")
+            self.assertEqual(
+                startup_states[0]["startup_health_reason"],
+                "schedulable_gpu_count=4 < required=8",
+            )
+
+    def test_startup_gpu_shortage_exit_mode_keeps_old_failure(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_startup_exit_mode_test")
+        with tempfile.TemporaryDirectory(prefix="node-controller-startup-exit-") as tmpdir:
+            root = Path(tmpdir) / "runtime"
+            root.mkdir(parents=True, exist_ok=True)
+            layout = module.build_layout(root)
+            args = SimpleNamespace(
+                root=root,
+                poll_seconds=0.0,
+                heartbeat_seconds=9999.0,
+                managed_gpu_indices="0,1,2,3,4,5,6,7",
+                supervisor_grace_seconds=15.0,
+                enable_compat_kill_queue=False,
+                foreign_gpu_memory_threshold_mb=2048,
+                startup_min_schedulable_gpu_count=8,
+                startup_unhealthy_action="exit",
+                once=True,
+            )
+            startup_availability = {
+                "active_gpu_indices": [],
+                "active_untracked_gpu_indices": [],
+                "externally_blocked_gpu_indices": ["4", "5", "6", "7"],
+                "schedulable_gpu_indices": ["0", "1", "2", "3"],
+                "unavailable_gpu_indices": ["4", "5", "6", "7"],
+                "free_gpu_indices": ["0", "1", "2", "3"],
+                "gpu_external_block_reasons": {"4": ["foreign_proc pid=999 name=[Not Found] mem=45076"]},
+            }
+            state_payloads: list[dict[str, object]] = []
+            event_names: list[str] = []
+
+            def record_state(_layout, payload, *, acquired_at_epoch=None):
+                state_payloads.append(payload.copy())
+
+            def record_event(_layout, event, **_kwargs):
+                event_names.append(event)
+
+            with (
+                mock.patch.object(module, "parse_args", return_value=args),
+                mock.patch.object(module, "acquire_controller_lease", return_value=123.0),
+                mock.patch.object(module, "release_controller_lease"),
+                mock.patch.object(module, "detect_managed_gpu_indices", return_value=["0", "1", "2", "3", "4", "5", "6", "7"]),
+                mock.patch.object(module, "adopt_running_jobs", return_value=[]),
+                mock.patch.object(module, "probe_gpu_status", return_value=[]),
+                mock.patch.object(module, "probe_gpu_processes", return_value=[]),
+                mock.patch.object(module, "summarize_gpu_availability", return_value=startup_availability),
+                mock.patch.object(module, "write_controller_state_snapshots", side_effect=record_state),
+                mock.patch.object(module, "append_controller_event", side_effect=record_event),
+                mock.patch.object(module, "append_jsonl"),
+            ):
+                rc = module.main()
+
+            self.assertEqual(rc, 2)
+            self.assertIn("controller_startup_unhealthy", event_names)
+            startup_states = [payload for payload in state_payloads if payload.get("startup_health_status") == "failed"]
+            self.assertTrue(startup_states)
+            self.assertEqual(startup_states[0]["startup_health_action"], "exit")
+
     def test_status_script_reads_sandbox_pointer_and_flags_untracked_gpu(self) -> None:
         with tempfile.TemporaryDirectory(prefix="node-controller-status-") as tmpdir:
             sandbox_root = Path(tmpdir)

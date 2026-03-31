@@ -207,7 +207,8 @@ while true; do
     --poll-seconds "${CONTROLLER_POLL_SECONDS:-2}" \
     --heartbeat-seconds "${CONTROLLER_HEARTBEAT_SECONDS:-10}" \
     --foreign-gpu-memory-threshold-mb "${CONTROLLER_FOREIGN_GPU_MEMORY_THRESHOLD_MB:-2048}" \
-    --startup-min-schedulable-gpu-count "${CONTROLLER_STARTUP_MIN_SCHEDULABLE_GPUS:-0}"
+    --startup-min-schedulable-gpu-count "${CONTROLLER_STARTUP_MIN_SCHEDULABLE_GPUS:-0}" \
+    --startup-unhealthy-action "${CONTROLLER_STARTUP_UNHEALTHY_ACTION:-wait}"
   rc=$?
   set -e
 

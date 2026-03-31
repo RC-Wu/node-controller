@@ -87,6 +87,8 @@ def test_invalid_queue_json(tmp_root: Path) -> None:
 
 def test_restart_and_reattach(tmp_root: Path) -> None:
     runtime = tmp_root / "reattach"
+    started_flag = runtime / "long_job_started.txt"
+    finished_flag = runtime / "long_job_finished.txt"
     run(
         sys.executable,
         str(SUBMIT_JOB),
@@ -97,7 +99,14 @@ def test_restart_and_reattach(tmp_root: Path) -> None:
         "--",
         sys.executable,
         "-c",
-        "import time; print('long_job_start', flush=True); time.sleep(3); print('long_job_done', flush=True)",
+        (
+            "import pathlib,time; "
+            f"pathlib.Path({str(started_flag)!r}).write_text('started', encoding='utf-8'); "
+            "print('long_job_start', flush=True); "
+            "time.sleep(3); "
+            f"pathlib.Path({str(finished_flag)!r}).write_text('done', encoding='utf-8'); "
+            "print('long_job_done', flush=True)"
+        ),
     )
     controller1 = subprocess.Popen(
         [sys.executable, str(CONTROLLER), "--root", str(runtime), "--poll-seconds", "0.1", "--heartbeat-seconds", "0.1"],
@@ -106,6 +115,7 @@ def test_restart_and_reattach(tmp_root: Path) -> None:
     )
     try:
         wait_for(runtime / "jobs" / "running" / "long_job.meta.json", timeout=10.0)
+        wait_for(started_flag, timeout=10.0)
         controller1.kill()
         controller1.wait(timeout=10.0)
         shutil.rmtree(runtime / "state" / "controller.lock", ignore_errors=True)
@@ -131,6 +141,8 @@ def test_restart_and_reattach(tmp_root: Path) -> None:
         result_path = runtime / "jobs" / "done" / "long_job.result.json"
         if not result_path.exists():
             raise AssertionError("reattach: final result missing")
+        if not finished_flag.exists():
+            raise AssertionError("reattach: child completion marker missing")
     finally:
         if controller1.poll() is None:
             controller1.kill()

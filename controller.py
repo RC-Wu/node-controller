@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="If no jobs were reattached on boot, require at least this many schedulable GPUs or exit non-zero.",
     )
+    ap.add_argument(
+        "--startup-unhealthy-action",
+        choices=("exit", "wait"),
+        default="wait",
+        help="When startup_min_schedulable_gpu_count is not met, either exit non-zero or stay alive and keep probing.",
+    )
     ap.add_argument("--once", action="store_true", help="Process at most one visible queue item, then exit.")
     return ap.parse_args()
 
@@ -1985,9 +1991,25 @@ def main() -> int:
         gpu_processes=startup_gpu_processes,
         foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
     )
+    stop_when_idle = False
+    startup_health_fields: dict[str, str] = {}
+    last_control_action: str | None = None
     if not active_runs and args.startup_min_schedulable_gpu_count > 0:
         schedulable_count = len(startup_gpu_availability["schedulable_gpu_indices"])
         if schedulable_count < args.startup_min_schedulable_gpu_count:
+            startup_health_action = str(getattr(args, "startup_unhealthy_action", "wait") or "wait").strip().lower()
+            if startup_health_action not in {"exit", "wait"}:
+                startup_health_action = "wait"
+            is_exit_action = startup_health_action == "exit"
+            startup_event = "controller_startup_unhealthy" if is_exit_action else "controller_startup_waiting_for_gpus"
+            last_control_action = "startup_unhealthy" if is_exit_action else "startup_waiting_for_gpus"
+            startup_health_fields = {
+                "startup_health_status": "failed" if is_exit_action else "waiting",
+                "startup_health_reason": (
+                    f"schedulable_gpu_count={schedulable_count} < required={args.startup_min_schedulable_gpu_count}"
+                ),
+                "startup_health_action": startup_health_action,
+            }
             payload = controller_payload(
                 layout,
                 active_runs,
@@ -1995,20 +2017,18 @@ def main() -> int:
                 gpu_availability=startup_gpu_availability,
                 gpu_status=startup_gpu_status,
                 gpu_processes=startup_gpu_processes,
-                stop_when_idle=False,
-                last_control_action="startup_unhealthy",
+                stop_when_idle=stop_when_idle,
+                last_control_action=last_control_action,
                 acquired_at_epoch=acquired_at_epoch,
             )
-            payload["startup_health_status"] = "failed"
-            payload["startup_health_reason"] = (
-                f"schedulable_gpu_count={schedulable_count} < required={args.startup_min_schedulable_gpu_count}"
-            )
+            payload.update(startup_health_fields)
             write_controller_state_snapshots(layout, payload, acquired_at_epoch=acquired_at_epoch)
             append_controller_event(
                 layout,
-                "controller_startup_unhealthy",
+                startup_event,
                 audit=True,
-                message=payload["startup_health_reason"],
+                message=startup_health_fields["startup_health_reason"],
+                startup_health_action=startup_health_action,
                 schedulable_gpu_indices=startup_gpu_availability["schedulable_gpu_indices"],
                 externally_blocked_gpu_indices=startup_gpu_availability["externally_blocked_gpu_indices"],
             )
@@ -2016,17 +2036,21 @@ def main() -> int:
                 layout.controller_heartbeat,
                 {
                     **payload,
-                    "event": "controller_startup_unhealthy",
+                    "event": startup_event,
                 },
             )
-            return 2
+            if is_exit_action:
+                return 2
     last_heartbeat = 0.0
-    stop_when_idle = False
-    last_control_action: str | None = None
     launched_any = False
     shutdown_reason: str | None = None
     signal_count = 0
     exception_backoff_seconds = 1.0
+
+    def with_startup_health(payload: dict[str, Any]) -> dict[str, Any]:
+        if startup_health_fields:
+            payload.update(startup_health_fields)
+        return payload
 
     def request_shutdown(signum: int, _frame: Any) -> None:
         nonlocal stop_when_idle, shutdown_reason, signal_count, last_control_action
@@ -2094,6 +2118,7 @@ def main() -> int:
                             last_control_action=last_control_action,
                             acquired_at_epoch=acquired_at_epoch,
                         )
+                        payload = with_startup_health(payload)
                         write_controller_state_snapshots(layout, payload, acquired_at_epoch=acquired_at_epoch)
                         refresh_controller_lease(
                             layout,
@@ -2135,6 +2160,24 @@ def main() -> int:
                         gpu_processes=current_gpu_processes,
                         foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
                     )
+                    if startup_health_fields.get("startup_health_status") == "waiting":
+                        current_schedulable_count = len(current_gpu_availability["schedulable_gpu_indices"])
+                        if current_schedulable_count >= args.startup_min_schedulable_gpu_count:
+                            startup_health_fields = {
+                                "startup_health_status": "recovered",
+                                "startup_health_reason": (
+                                    f"schedulable_gpu_count={current_schedulable_count} >= required={args.startup_min_schedulable_gpu_count}"
+                                ),
+                                "startup_health_action": "wait",
+                            }
+                            last_control_action = "startup_wait_recovered"
+                            append_controller_event(
+                                layout,
+                                "controller_startup_wait_recovered",
+                                audit=True,
+                                message=startup_health_fields["startup_health_reason"],
+                                schedulable_gpu_indices=current_gpu_availability["schedulable_gpu_indices"],
+                            )
                     active_runs = dispatch_launchable_jobs(
                         layout,
                         active_runs,
@@ -2168,6 +2211,7 @@ def main() -> int:
                         last_control_action=last_control_action,
                         acquired_at_epoch=acquired_at_epoch,
                     )
+                    payload = with_startup_health(payload)
                     write_controller_state_snapshots(layout, payload, acquired_at_epoch=acquired_at_epoch)
                     refresh_controller_lease(
                         layout,
@@ -2198,6 +2242,7 @@ def main() -> int:
                         last_control_action=last_control_action,
                         acquired_at_epoch=acquired_at_epoch,
                     )
+                    payload = with_startup_health(payload)
                     write_controller_state_snapshots(layout, payload, acquired_at_epoch=acquired_at_epoch)
                     append_controller_event(
                         layout,
