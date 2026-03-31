@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_ROOT="${CONTROLLER_SANDBOX_ROOT:-$SCRIPT_DIR}"
+CODE_ROOT="${CONTROLLER_CODE_ROOT:-$SCRIPT_DIR}"
 CONTROLLER_RUN_AS_ROOT="${CONTROLLER_RUN_AS_ROOT:-0}"
 
 if [ "$CONTROLLER_RUN_AS_ROOT" != "1" ] && [ "${CONTROLLER_DROPPED_PRIVS:-0}" != "1" ] && [ "$(id -u)" = "0" ] && [ -d "$SANDBOX_ROOT" ]; then
@@ -201,15 +202,22 @@ while true; do
   ensure_public_queue_access
   set +e
   "$PYTHON_BIN" \
-    "$SANDBOX_ROOT/controller.py" \
+    "$CODE_ROOT/controller.py" \
     --root "$RUNTIME_ROOT" \
     --poll-seconds "${CONTROLLER_POLL_SECONDS:-2}" \
-    --heartbeat-seconds "${CONTROLLER_HEARTBEAT_SECONDS:-10}"
+    --heartbeat-seconds "${CONTROLLER_HEARTBEAT_SECONDS:-10}" \
+    --foreign-gpu-memory-threshold-mb "${CONTROLLER_FOREIGN_GPU_MEMORY_THRESHOLD_MB:-2048}" \
+    --startup-min-schedulable-gpu-count "${CONTROLLER_STARTUP_MIN_SCHEDULABLE_GPUS:-0}"
   rc=$?
   set -e
 
   write_supervisor_status "controller_exited" "$rc" "$restart_count"
   ensure_public_queue_access
+  if [ "$rc" -eq 2 ]; then
+    write_supervisor_status "startup_unhealthy" "$rc" "$restart_count"
+    ensure_public_queue_access
+    exit "$rc"
+  fi
   if [ "$rc" -eq 0 ] || [ "$AUTO_RESTART" != "1" ]; then
     write_supervisor_status "stopped" "$rc" "$restart_count"
     ensure_public_queue_access

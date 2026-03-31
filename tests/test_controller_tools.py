@@ -15,17 +15,78 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "controller_status.py"
 SUPERVISOR_SCRIPT = REPO_ROOT / "scripts" / "controller_supervisor.py"
+CONTROLLER_SCRIPT = REPO_ROOT / "controller.py"
 
 
 def load_module(path: Path, module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
 
 class ControllerToolingTest(unittest.TestCase):
+    def test_controller_gpu_availability_quarantines_foreign_usage(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_gpu_availability_test")
+        availability = module.summarize_gpu_availability(
+            ["0", "1", "2"],
+            [],
+            gpu_status=[
+                {"index": 0, "util_pct": 100, "mem_used_mb": 32000, "mem_total_mb": 81920, "temp_c": 40},
+                {"index": 1, "util_pct": 0, "mem_used_mb": 0, "mem_total_mb": 81920, "temp_c": 31},
+                {"index": 2, "util_pct": 0, "mem_used_mb": 0, "mem_total_mb": 81920, "temp_c": 30},
+            ],
+            gpu_processes=[
+                {"gpu_index": 0, "pid": 2872525, "process_name": "[Not Found]", "used_memory_mb": 31990, "controller_job_id": None},
+            ],
+            foreign_gpu_memory_threshold_mb=2048,
+        )
+        self.assertEqual(availability["externally_blocked_gpu_indices"], ["0"])
+        self.assertEqual(availability["schedulable_gpu_indices"], ["1", "2"])
+        self.assertEqual(availability["free_gpu_indices"], ["1", "2"])
+        self.assertIn("foreign_proc", availability["gpu_external_block_reasons"]["0"][0])
+
+    def test_controller_gpu_availability_keeps_active_gpu_separate_from_foreign_block(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_gpu_active_untracked_test")
+        active_run = SimpleNamespace(allocated_gpu_indices=["2", "3"])
+        availability = module.summarize_gpu_availability(
+            ["0", "1", "2", "3"],
+            [active_run],
+            gpu_status=[
+                {"index": 0, "util_pct": 95, "mem_used_mb": 48000, "mem_total_mb": 81920, "temp_c": 45},
+                {"index": 2, "util_pct": 90, "mem_used_mb": 27000, "mem_total_mb": 81920, "temp_c": 42},
+                {"index": 3, "util_pct": 90, "mem_used_mb": 27000, "mem_total_mb": 81920, "temp_c": 43},
+            ],
+            gpu_processes=[
+                {"gpu_index": 0, "pid": 4001, "process_name": "[Not Found]", "used_memory_mb": 47990, "controller_job_id": None},
+                {"gpu_index": 2, "pid": 5001, "process_name": "[Not Found]", "used_memory_mb": 26990, "controller_job_id": None},
+                {"gpu_index": 3, "pid": 5002, "process_name": "[Not Found]", "used_memory_mb": 26990, "controller_job_id": None},
+            ],
+            foreign_gpu_memory_threshold_mb=2048,
+        )
+        self.assertEqual(availability["active_gpu_indices"], ["2", "3"])
+        self.assertEqual(availability["externally_blocked_gpu_indices"], ["0"])
+        self.assertEqual(availability["active_untracked_gpu_indices"], ["2", "3"])
+        self.assertEqual(availability["schedulable_gpu_indices"], ["1", "2", "3"])
+
+    def test_reserve_job_respects_schedulable_gpu_indices(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_reserve_schedulable_test")
+        request = SimpleNamespace(
+            exclusive=False,
+            requested_gpu_indices=["0", "1"],
+            gpu_count=0,
+            allowed_gpu_indices=[],
+        )
+        allocation = module.reserve_job(
+            request,
+            [],
+            ["0", "1", "2", "3"],
+            schedulable_gpu_indices=["2", "3"],
+        )
+        self.assertIsNone(allocation)
+
     def test_status_script_reads_sandbox_pointer_and_flags_untracked_gpu(self) -> None:
         with tempfile.TemporaryDirectory(prefix="node-controller-status-") as tmpdir:
             sandbox_root = Path(tmpdir)

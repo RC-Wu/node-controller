@@ -37,6 +37,17 @@ def wait_for(path: Path, timeout: float = 10.0) -> None:
     raise TimeoutError(f"timed out waiting for {path}")
 
 
+def wait_for_text(path: Path, needle: str, timeout: float = 10.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            text = path.read_text(encoding="utf-8")
+            if needle in text:
+                return
+        time.sleep(0.1)
+    raise TimeoutError(f"timed out waiting for {needle!r} in {path}")
+
+
 def test_queue_to_done(tmp_root: Path) -> None:
     runtime = tmp_root / "queue_to_done"
     run(
@@ -116,9 +127,7 @@ def test_restart_and_reattach(tmp_root: Path) -> None:
         controller2.wait(timeout=15.0)
         if controller2.returncode != 0:
             raise AssertionError(f"reattach: controller2 exited with {controller2.returncode}")
-        heartbeat = (runtime / "logs" / "controller_heartbeat.jsonl").read_text(encoding="utf-8")
-        if "job_reattached" not in heartbeat:
-            raise AssertionError("reattach: missing job_reattached heartbeat")
+        wait_for_text(runtime / "logs" / "controller_heartbeat.jsonl", "job_reattached", timeout=5.0)
         result_path = runtime / "jobs" / "done" / "long_job.result.json"
         if not result_path.exists():
             raise AssertionError("reattach: final result missing")

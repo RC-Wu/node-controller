@@ -43,6 +43,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Re-enable legacy jobs/kill compatibility processing. Disabled by default for safety/auditability.",
     )
+    ap.add_argument(
+        "--foreign-gpu-memory-threshold-mb",
+        type=int,
+        default=2048,
+        help="Treat non-controller GPU usage above this memory threshold as externally blocked for scheduling.",
+    )
+    ap.add_argument(
+        "--startup-min-schedulable-gpu-count",
+        type=int,
+        default=0,
+        help="If no jobs were reattached on boot, require at least this many schedulable GPUs or exit non-zero.",
+    )
     ap.add_argument("--once", action="store_true", help="Process at most one visible queue item, then exit.")
     return ap.parse_args()
 
@@ -783,6 +795,91 @@ def active_gpu_indices(active_runs: list[ActiveRun]) -> list[str]:
     return sorted(allocated, key=int)
 
 
+def summarize_gpu_availability(
+    managed_gpu_indices: list[str],
+    active_runs: list["ActiveRun"],
+    *,
+    gpu_status: list[dict[str, Any]] | None = None,
+    gpu_processes: list[dict[str, Any]] | None = None,
+    foreign_gpu_memory_threshold_mb: int = 2048,
+) -> dict[str, Any]:
+    active_gpu = set(active_gpu_indices(active_runs))
+    proc_by_gpu: dict[str, list[dict[str, Any]]] = {}
+    for proc in gpu_processes or []:
+        if not isinstance(proc, dict):
+            continue
+        proc_by_gpu.setdefault(str(proc.get("gpu_index")), []).append(proc)
+
+    status_by_gpu: dict[str, dict[str, Any]] = {}
+    for row in gpu_status or []:
+        if not isinstance(row, dict):
+            continue
+        status_by_gpu[str(row.get("index"))] = row
+
+    external_blocked: set[str] = set()
+    active_untracked: set[str] = set()
+    reasons: dict[str, list[str]] = {}
+
+    def add_reason(index: str, reason: str) -> None:
+        reasons.setdefault(index, []).append(reason)
+
+    threshold = max(0, int(foreign_gpu_memory_threshold_mb))
+    for index in managed_gpu_indices:
+        untracked_rows = [row for row in proc_by_gpu.get(index, []) if not row.get("controller_job_id")]
+        if index in active_gpu:
+            if untracked_rows:
+                active_untracked.add(index)
+                for row in untracked_rows:
+                    add_reason(
+                        index,
+                        f"active_gpu_untracked_proc pid={row.get('pid')} name={row.get('process_name')} mem={row.get('used_memory_mb')}",
+                    )
+            continue
+
+        blocked = False
+        for row in untracked_rows:
+            mem_used = row.get("used_memory_mb")
+            if mem_used is None:
+                blocked = True
+            else:
+                try:
+                    blocked = int(mem_used) >= threshold
+                except Exception:
+                    blocked = True
+            if blocked:
+                add_reason(
+                    index,
+                    f"foreign_proc pid={row.get('pid')} name={row.get('process_name')} mem={row.get('used_memory_mb')}",
+                )
+                break
+
+        if not blocked:
+            status_row = status_by_gpu.get(index)
+            mem_used = None if status_row is None else status_row.get("mem_used_mb")
+            try:
+                if mem_used is not None and int(mem_used) >= threshold:
+                    blocked = True
+                    add_reason(index, f"foreign_mem_only mem={mem_used}")
+            except Exception:
+                pass
+
+        if blocked:
+            external_blocked.add(index)
+
+    schedulable = [idx for idx in managed_gpu_indices if idx not in external_blocked]
+    unavailable = sorted(active_gpu | external_blocked, key=int)
+    free = [idx for idx in schedulable if idx not in active_gpu]
+    return {
+        "active_gpu_indices": sorted(active_gpu, key=int),
+        "active_untracked_gpu_indices": sorted(active_untracked, key=int),
+        "externally_blocked_gpu_indices": sorted(external_blocked, key=int),
+        "schedulable_gpu_indices": schedulable,
+        "unavailable_gpu_indices": unavailable,
+        "free_gpu_indices": free,
+        "gpu_external_block_reasons": reasons,
+    }
+
+
 def count_json_files(path: Path) -> int:
     return sum(1 for child in path.iterdir() if child.is_file() and child.suffix == ".json")
 
@@ -806,6 +903,8 @@ def reserve_job(
     request: JobRequest,
     active_runs: list[ActiveRun],
     managed_gpu_indices: list[str],
+    *,
+    schedulable_gpu_indices: list[str] | None = None,
 ) -> list[str] | None:
     if any(run.exclusive for run in active_runs):
         return None
@@ -813,6 +912,7 @@ def reserve_job(
         return None
 
     occupied = set(active_gpu_indices(active_runs))
+    schedulable = normalize_gpu_indices(schedulable_gpu_indices or managed_gpu_indices)
     if request.requested_gpu_indices:
         if managed_gpu_indices:
             unknown = sorted(set(request.requested_gpu_indices) - set(managed_gpu_indices), key=int)
@@ -820,13 +920,15 @@ def reserve_job(
                 raise ValueError(f"requested_gpu_indices {unknown} outside managed_gpus {managed_gpu_indices}")
         if occupied.intersection(request.requested_gpu_indices):
             return None
+        if any(idx not in schedulable for idx in request.requested_gpu_indices):
+            return None
         return request.requested_gpu_indices
 
     if request.gpu_count > 0:
-        candidate_pool = request.allowed_gpu_indices or managed_gpu_indices
+        candidate_pool = request.allowed_gpu_indices or schedulable
         if not candidate_pool:
             raise ValueError("gpu_count requires allow_gpu_indices or controller managed_gpus")
-        free = [idx for idx in candidate_pool if idx not in occupied]
+        free = [idx for idx in candidate_pool if idx in set(schedulable) and idx not in occupied]
         if len(free) < request.gpu_count:
             return None
         return free[: request.gpu_count]
@@ -1046,6 +1148,7 @@ def controller_payload(
     active_runs: list[ActiveRun],
     *,
     managed_gpu_indices: list[str],
+    gpu_availability: dict[str, Any] | None = None,
     gpu_status: list[dict[str, Any]] | None = None,
     gpu_processes: list[dict[str, Any]] | None = None,
     stop_when_idle: bool = False,
@@ -1057,7 +1160,13 @@ def controller_payload(
         refresh_run_meta_from_disk(run)
         active_jobs.append(summarize_active_run(run))
     active_job = active_jobs[0] if len(active_jobs) == 1 else None
-    active_gpu = active_gpu_indices(active_runs)
+    gpu_availability = gpu_availability or summarize_gpu_availability(
+        managed_gpu_indices,
+        active_runs,
+        gpu_status=gpu_status,
+        gpu_processes=gpu_processes,
+    )
+    active_gpu = gpu_availability["active_gpu_indices"]
     counts = runtime_counts(layout)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -1090,8 +1199,13 @@ def controller_payload(
         "managed_gpu_indices": managed_gpu_indices,
         "controller_gpu_indices": managed_gpu_indices,
         "active_gpu_indices": active_gpu,
-        "occupied_gpu_indices": active_gpu,
-        "free_gpu_indices": [idx for idx in managed_gpu_indices if idx not in set(active_gpu)],
+        "active_untracked_gpu_indices": gpu_availability["active_untracked_gpu_indices"],
+        "externally_blocked_gpu_indices": gpu_availability["externally_blocked_gpu_indices"],
+        "schedulable_gpu_indices": gpu_availability["schedulable_gpu_indices"],
+        "unavailable_gpu_indices": gpu_availability["unavailable_gpu_indices"],
+        "occupied_gpu_indices": gpu_availability["unavailable_gpu_indices"],
+        "free_gpu_indices": gpu_availability["free_gpu_indices"],
+        "gpu_external_block_reasons": gpu_availability["gpu_external_block_reasons"],
         "gpu_status": gpu_status or [],
         "gpu_processes": gpu_processes or [],
         "counts": counts,
@@ -1717,6 +1831,7 @@ def dispatch_launchable_jobs(
     active_runs: list[ActiveRun],
     managed_gpu_indices: list[str],
     *,
+    schedulable_gpu_indices: list[str],
     supervisor_grace_seconds: float,
     max_new_jobs: int | None = None,
 ) -> list[ActiveRun]:
@@ -1730,7 +1845,12 @@ def dispatch_launchable_jobs(
                 raise ValueError(f"invalid queue payload: {payload_error}")
             assert payload is not None
             request = load_job_request_payload(payload, source_path=spec_path)
-            allocated = reserve_job(request, active_runs, managed_gpu_indices)
+            allocated = reserve_job(
+                request,
+                active_runs,
+                managed_gpu_indices,
+                schedulable_gpu_indices=schedulable_gpu_indices,
+            )
         except ValueError as exc:
             fail_queued_job(layout, spec_path, reason=str(exc))
             append_controller_event(
@@ -1830,6 +1950,50 @@ def main() -> int:
                 "updated_at_epoch": time.time(),
             },
         )
+    startup_gpu_status = probe_gpu_status(managed_gpu_indices)
+    startup_gpu_processes = probe_gpu_processes(managed_gpu_indices, active_runs)
+    startup_gpu_availability = summarize_gpu_availability(
+        managed_gpu_indices,
+        active_runs,
+        gpu_status=startup_gpu_status,
+        gpu_processes=startup_gpu_processes,
+        foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
+    )
+    if not active_runs and args.startup_min_schedulable_gpu_count > 0:
+        schedulable_count = len(startup_gpu_availability["schedulable_gpu_indices"])
+        if schedulable_count < args.startup_min_schedulable_gpu_count:
+            payload = controller_payload(
+                layout,
+                active_runs,
+                managed_gpu_indices=managed_gpu_indices,
+                gpu_availability=startup_gpu_availability,
+                gpu_status=startup_gpu_status,
+                gpu_processes=startup_gpu_processes,
+                stop_when_idle=False,
+                last_control_action="startup_unhealthy",
+                acquired_at_epoch=acquired_at_epoch,
+            )
+            payload["startup_health_status"] = "failed"
+            payload["startup_health_reason"] = (
+                f"schedulable_gpu_count={schedulable_count} < required={args.startup_min_schedulable_gpu_count}"
+            )
+            write_controller_state_snapshots(layout, payload, acquired_at_epoch=acquired_at_epoch)
+            append_controller_event(
+                layout,
+                "controller_startup_unhealthy",
+                audit=True,
+                message=payload["startup_health_reason"],
+                schedulable_gpu_indices=startup_gpu_availability["schedulable_gpu_indices"],
+                externally_blocked_gpu_indices=startup_gpu_availability["externally_blocked_gpu_indices"],
+            )
+            append_jsonl(
+                layout.controller_heartbeat,
+                {
+                    **payload,
+                    "event": "controller_startup_unhealthy",
+                },
+            )
+            return 2
     last_heartbeat = 0.0
     stop_when_idle = False
     last_control_action: str | None = None
@@ -1886,10 +2050,18 @@ def main() -> int:
                     if should_exit and not active_runs:
                         gpu_status = probe_gpu_status(managed_gpu_indices)
                         gpu_processes = probe_gpu_processes(managed_gpu_indices, active_runs)
+                        gpu_availability = summarize_gpu_availability(
+                            managed_gpu_indices,
+                            active_runs,
+                            gpu_status=gpu_status,
+                            gpu_processes=gpu_processes,
+                            foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
+                        )
                         payload = controller_payload(
                             layout,
                             active_runs,
                             managed_gpu_indices=managed_gpu_indices,
+                            gpu_availability=gpu_availability,
                             gpu_status=gpu_status,
                             gpu_processes=gpu_processes,
                             stop_when_idle=stop_when_idle,
@@ -1928,10 +2100,20 @@ def main() -> int:
                     last_control_action = "kill_signal"
 
                 if not stop_when_idle:
+                    current_gpu_status = probe_gpu_status(managed_gpu_indices)
+                    current_gpu_processes = probe_gpu_processes(managed_gpu_indices, active_runs)
+                    current_gpu_availability = summarize_gpu_availability(
+                        managed_gpu_indices,
+                        active_runs,
+                        gpu_status=current_gpu_status,
+                        gpu_processes=current_gpu_processes,
+                        foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
+                    )
                     active_runs = dispatch_launchable_jobs(
                         layout,
                         active_runs,
                         managed_gpu_indices,
+                        schedulable_gpu_indices=current_gpu_availability["schedulable_gpu_indices"],
                         supervisor_grace_seconds=args.supervisor_grace_seconds,
                         max_new_jobs=1 if args.once and not launched_any else None,
                     )
@@ -1942,10 +2124,18 @@ def main() -> int:
                 if now - last_heartbeat >= args.heartbeat_seconds:
                     gpu_status = probe_gpu_status(managed_gpu_indices)
                     gpu_processes = probe_gpu_processes(managed_gpu_indices, active_runs)
+                    gpu_availability = summarize_gpu_availability(
+                        managed_gpu_indices,
+                        active_runs,
+                        gpu_status=gpu_status,
+                        gpu_processes=gpu_processes,
+                        foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
+                    )
                     payload = controller_payload(
                         layout,
                         active_runs,
                         managed_gpu_indices=managed_gpu_indices,
+                        gpu_availability=gpu_availability,
                         gpu_status=gpu_status,
                         gpu_processes=gpu_processes,
                         stop_when_idle=stop_when_idle,
@@ -1964,10 +2154,18 @@ def main() -> int:
                 if stop_when_idle and not active_runs:
                     gpu_status = probe_gpu_status(managed_gpu_indices)
                     gpu_processes = probe_gpu_processes(managed_gpu_indices, active_runs)
+                    gpu_availability = summarize_gpu_availability(
+                        managed_gpu_indices,
+                        active_runs,
+                        gpu_status=gpu_status,
+                        gpu_processes=gpu_processes,
+                        foreign_gpu_memory_threshold_mb=args.foreign_gpu_memory_threshold_mb,
+                    )
                     payload = controller_payload(
                         layout,
                         active_runs,
                         managed_gpu_indices=managed_gpu_indices,
+                        gpu_availability=gpu_availability,
                         gpu_status=gpu_status,
                         gpu_processes=gpu_processes,
                         stop_when_idle=stop_when_idle,

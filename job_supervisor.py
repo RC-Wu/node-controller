@@ -82,6 +82,31 @@ def process_exists(pid: int) -> bool:
     return True
 
 
+def process_group_exists(pgid: int) -> bool:
+    if pgid <= 0 or os.name == "nt" or not hasattr(os, "killpg"):
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def wait_for_process_group_exit(pgid: int, *, timeout: float) -> bool:
+    if not process_group_exists(pgid):
+        return True
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        if not process_group_exists(pgid):
+            return True
+        time.sleep(0.2)
+    return not process_group_exists(pgid)
+
+
 def current_process_group_id() -> int:
     getter = getattr(os, "getpgrp", None)
     if getter is None:
@@ -96,9 +121,10 @@ def terminate_process_tree(proc: subprocess.Popen[str], *, signal_name: str, gra
     if proc.poll() is not None:
         return proc.poll()
     sig = signal_from_name(signal_name)
-    if os.name != "nt" and hasattr(os, "killpg"):
+    pgid = proc.pid if os.name != "nt" and hasattr(os, "killpg") else None
+    if pgid is not None:
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(pgid, sig)
         except Exception:
             try:
                 proc.send_signal(sig)
@@ -109,25 +135,38 @@ def terminate_process_tree(proc: subprocess.Popen[str], *, signal_name: str, gra
             proc.send_signal(sig)
         except Exception:
             pass
-    deadline = time.time() + max(0.0, grace_seconds)
-    while time.time() < deadline:
-        rc = proc.poll()
-        if rc is not None:
-            return rc
-        time.sleep(0.2)
-    if os.name != "nt" and hasattr(os, "killpg"):
+
+    group_exited = False
+    if pgid is not None:
+        group_exited = wait_for_process_group_exit(pgid, timeout=grace_seconds)
+    else:
+        deadline = time.time() + max(0.0, grace_seconds)
+        while time.time() < deadline:
+            rc = proc.poll()
+            if rc is not None:
+                return rc
+            time.sleep(0.2)
+        group_exited = proc.poll() is not None
+
+    if not group_exited and pgid is not None:
         try:
-            os.killpg(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            os.killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except Exception:
             try:
                 proc.kill()
             except Exception:
                 pass
-    else:
+        wait_for_process_group_exit(pgid, timeout=5.0)
+    elif not group_exited:
         try:
             proc.kill()
         except Exception:
             pass
+    else:
+        try:
+            return proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return proc.poll()
     try:
         return proc.wait(timeout=5)
     except subprocess.TimeoutExpired:

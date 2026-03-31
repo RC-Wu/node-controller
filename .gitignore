@@ -7,3 +7,5 @@ logs/
 *.log
 *.pid
 *.tmp
+tmp_*.yaml
+tmp_*.yml

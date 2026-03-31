@@ -74,6 +74,8 @@ def render_status_summary(state: dict) -> str:
     heartbeat_age = format_age_seconds(state.get("updated_at_epoch"))
     runtime_root = state.get("runtime_root", "")
     managed_gpus = ",".join(str(item) for item in state.get("managed_gpu_indices") or [])
+    schedulable_gpus = ",".join(str(item) for item in state.get("schedulable_gpu_indices") or [])
+    external_blocked = ",".join(str(item) for item in state.get("externally_blocked_gpu_indices") or [])
     active_jobs = state.get("active_jobs") or []
 
     process_map: dict[int, list[str]] = {}
@@ -89,7 +91,12 @@ def render_status_summary(state: dict) -> str:
 
     lines = [
         f"runtime_root: {runtime_root}",
-        f"controller: host={state.get('hostname', '?')} pid={state.get('pid', '?')} heartbeat_age={heartbeat_age} managed_gpus={managed_gpus or '-'}",
+        (
+            f"controller: host={state.get('hostname', '?')} pid={state.get('pid', '?')} "
+            f"heartbeat_age={heartbeat_age} managed_gpus={managed_gpus or '-'} "
+            f"schedulable_gpus={schedulable_gpus or '-'} "
+            f"external_blocked={external_blocked or '-'}"
+        ),
         (
             "jobs: "
             f"active={int(state.get('active_job_count', 0) or 0)} "
@@ -120,12 +127,25 @@ def render_status_summary(state: dict) -> str:
         for row in gpu_rows:
             idx = int(row.get("index", -1))
             proc_text = "; ".join(process_map.get(idx, [])) or "-"
+            idx_text = str(idx)
+            note_parts: list[str] = []
+            if idx_text in {str(item) for item in state.get("active_gpu_indices") or []}:
+                note_parts.append("controller_active")
+            if idx_text in {str(item) for item in state.get("externally_blocked_gpu_indices") or []}:
+                note_parts.append("external_blocked")
+            if idx_text in {str(item) for item in state.get("active_untracked_gpu_indices") or []}:
+                note_parts.append("active_untracked_proc")
+            reason_text = "; ".join((state.get("gpu_external_block_reasons") or {}).get(idx_text) or [])
+            if reason_text:
+                note_parts.append(reason_text)
+            note = " | ".join(note_parts) if note_parts else "-"
             lines.append(
                 "  "
                 + f"gpu{idx}: util={row.get('util_pct', '?')}% "
                 + f"mem={row.get('mem_used_mb', '?')}/{row.get('mem_total_mb', '?')}MB "
                 + f"temp={row.get('temp_c', '?')}C "
-                + f"procs={proc_text}"
+                + f"procs={proc_text} "
+                + f"note={note}"
             )
     else:
         lines.append("gpu_status: unavailable")

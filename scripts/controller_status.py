@@ -160,17 +160,28 @@ def render_text(bundle: dict[str, Any], *, pointer: dict[str, Any] | None, point
     lines.append("")
     lines.append("GPUs")
     lines.append("idx util mem(MB) temp owner processes note")
+    active_gpu = {str(item) for item in state.get("active_gpu_indices") or []}
+    external_blocked = {str(item) for item in state.get("externally_blocked_gpu_indices") or []}
+    active_untracked = {str(item) for item in state.get("active_untracked_gpu_indices") or []}
+    block_reasons = state.get("gpu_external_block_reasons") or {}
     for gpu in state.get("gpu_status") or []:
         if not isinstance(gpu, dict):
             continue
         index = str(gpu.get("index", "?"))
         owner = owner_map.get(index, "-")
         proc_rows = proc_map.get(index, [])
-        note = "-"
-        if owner == "-" and proc_rows:
-            note = "external_or_untracked"
-        elif owner != "-" and proc_rows:
-            note = f"controller_job:{owner}"
+        note_parts: list[str] = []
+        if index in active_gpu:
+            note_parts.append(f"controller_job:{owner}" if owner != "-" else "controller_active")
+        elif owner == "-" and proc_rows:
+            note_parts.append("external_or_untracked")
+        if index in external_blocked:
+            note_parts.append("external_blocked")
+        if index in active_untracked:
+            note_parts.append("active_untracked_proc")
+        if block_reasons.get(index):
+            note_parts.extend(str(item) for item in block_reasons[index])
+        note = " | ".join(note_parts) if note_parts else "-"
         lines.append(
             f"{index:>3} "
             f"{str(gpu.get('util_pct', '-')):>4} "
