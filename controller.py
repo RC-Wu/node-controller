@@ -92,6 +92,31 @@ def append_text_log(path: Path, message: str) -> None:
         handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
 
 
+def wait_for_running_meta_stabilization(
+    running_meta_path: Path,
+    meta_payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 2.0,
+) -> dict[str, Any]:
+    transient_states = {"launching", "spawned", "starting"}
+    state = str(meta_payload.get("supervisor_state") or "")
+    if state not in transient_states:
+        return meta_payload
+
+    latest = meta_payload
+    deadline = time.time() + max(0.0, timeout_seconds)
+    while time.time() < deadline:
+        final_status = str(latest.get("final_status") or "")
+        pid = int(latest.get("supervisor_pid") or 0)
+        if final_status or (pid > 0 and process_exists(pid)):
+            return latest
+        time.sleep(0.1)
+        refreshed_payload, refreshed_error = read_json_safe(running_meta_path)
+        if refreshed_error is None and refreshed_payload is not None:
+            latest = refreshed_payload
+    return latest
+
+
 def bool_value(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -1560,6 +1585,7 @@ def adopt_running_jobs(layout: RuntimeLayout) -> list[ActiveRun]:
             )
             continue
         assert meta_payload is not None
+        meta_payload = wait_for_running_meta_stabilization(running_meta_path, meta_payload)
         final_status = str(meta_payload.get("final_status") or "")
         if final_status:
             run = ActiveRun(

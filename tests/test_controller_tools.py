@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -28,6 +30,66 @@ def load_module(path: Path, module_name: str):
 
 
 class ControllerToolingTest(unittest.TestCase):
+    def test_adopt_running_jobs_waits_for_bootstrap_meta_settle(self) -> None:
+        module = load_module(CONTROLLER_SCRIPT, "controller_bootstrap_settle_test")
+        with tempfile.TemporaryDirectory(prefix="node-controller-adopt-") as tmpdir:
+            root = Path(tmpdir)
+            layout = module.build_layout(root)
+            running_spec = layout.running_dir / "bootstrap_job.json"
+            running_meta = layout.running_dir / "bootstrap_job.meta.json"
+            command = [sys.executable, "-c", "import time; time.sleep(30)"]
+            module.write_json(
+                running_spec,
+                {
+                    "schema_version": 2,
+                    "job_id": "bootstrap_job",
+                    "command": command,
+                },
+            )
+            module.write_json(
+                running_meta,
+                {
+                    "schema_version": 2,
+                    "job_id": "bootstrap_job",
+                    "command": command,
+                    "workdir": str(root),
+                    "running_spec_path": str(running_spec),
+                    "allocated_gpu_indices": [],
+                    "exclusive": False,
+                    "supervisor_state": "launching",
+                    "controller_launch_pid": os.getpid(),
+                    "started_at_epoch": time.time(),
+                },
+            )
+            proc = subprocess.Popen(command, cwd=str(root), start_new_session=True)
+
+            def complete_meta() -> None:
+                time.sleep(0.2)
+                payload = module.read_json(running_meta)
+                payload.update(
+                    {
+                        "supervisor_pid": proc.pid,
+                        "supervisor_pgid": proc.pid,
+                        "supervisor_start_time_ticks": module.read_process_start_time_ticks(proc.pid),
+                        "supervisor_state": "spawned",
+                        "resolved_command": command,
+                    }
+                )
+                module.write_json(running_meta, payload)
+
+            updater = threading.Thread(target=complete_meta, daemon=True)
+            updater.start()
+            try:
+                adopted = module.adopt_running_jobs(layout)
+                self.assertEqual(len(adopted), 1)
+                self.assertEqual(adopted[0].meta["job_id"], "bootstrap_job")
+                self.assertFalse((layout.failed_dir / "bootstrap_job.result.json").exists())
+            finally:
+                updater.join(timeout=2.0)
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
     def test_controller_gpu_availability_quarantines_foreign_usage(self) -> None:
         module = load_module(CONTROLLER_SCRIPT, "controller_gpu_availability_test")
         availability = module.summarize_gpu_availability(
